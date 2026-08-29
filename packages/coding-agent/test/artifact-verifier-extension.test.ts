@@ -206,6 +206,25 @@ describe("artifact verifier example", () => {
 		expect(preflight?.message?.display).toBe(false);
 	});
 
+	it("adds hidden targeted-repair guidance when an existing artifact fails verification", async () => {
+		const harness = setup(project(), [
+			result(
+				{
+					ok: false,
+					summary: "one remaining failure",
+					issues: [{ code: "collapsed_pause_text" }],
+				},
+				1,
+			),
+		]);
+
+		const preflight = await harness.start();
+
+		expect(harness.exec).toHaveBeenCalledTimes(1);
+		expect(preflight?.message?.customType).toBe("artifact-verifier-preflight-repair");
+		expect(preflight?.message?.display).toBe(false);
+	});
+
 	it("fails closed when the repair budget is exhausted", async () => {
 		const config = { ...CONFIG, maxRepairs: 1 };
 		const dir = project();
