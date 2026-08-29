@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -20,6 +20,7 @@ const CONFIG = {
 	timeoutMs: 30_000,
 	maxRepairs: 2,
 	successToken: "PI_FLASH_TETRIS_OK",
+	artifactPaths: ["index.html"],
 };
 
 function assistant(text: string): AgentMessage {
@@ -146,6 +147,30 @@ describe("artifact verifier example", () => {
 
 		const verified = await harness.message("PI_FLASH_TETRIS_OK");
 		expect(verified).toBeUndefined();
+	});
+
+	it("restores the best artifact when a repair increases the issue count", async () => {
+		const dir = project();
+		const artifact = join(dir, "index.html");
+		writeFileSync(artifact, "best");
+		const harness = setup(dir, [
+			result({
+				ok: false,
+				summary: "two remaining failures",
+				issues: [{ code: "first" }, { code: "second" }],
+			}),
+			result({
+				ok: false,
+				summary: "repair regressed",
+				issues: [{ code: "first" }, { code: "second" }, { code: "page_error" }],
+			}),
+		]);
+
+		await harness.settle();
+		writeFileSync(artifact, "regressed");
+		await harness.settle();
+
+		expect(readFileSync(artifact, "utf8")).toBe("best");
 	});
 
 	it("fails closed when the repair budget is exhausted", async () => {
