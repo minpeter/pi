@@ -156,7 +156,8 @@ export default function artifactVerifier(pi: ExtensionAPI): void {
 				pi.sendUserMessage(
 					[
 						`Artifact verification failed. Repair attempt ${repairs} of ${active.maxRepairs}.`,
-						"Repair the artifact from this machine-readable report, then re-run your normal read check.",
+						"Make the smallest targeted edit that addresses only the listed issues. Read the current artifact before editing and preserve every behavior that is not reported as failing.",
+						"Do not replace or rewrite the whole artifact. If a prior repair removed an issue and the latest report brought it back, revert that regression and use a narrower edit.",
 						JSON.stringify(report),
 						`Do not emit ${active.successToken} until verification passes.`,
 					].join("\n"),
