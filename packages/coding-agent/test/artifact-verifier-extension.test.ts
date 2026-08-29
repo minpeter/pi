@@ -5,9 +5,18 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import artifactVerifier from "../examples/extensions/artifact-verifier.ts";
 import type { ExecResult, ExtensionAPI, ExtensionContext } from "../src/core/extensions/index.ts";
-import type { MessageEndEventResult } from "../src/core/extensions/types.ts";
+import type { BeforeAgentStartEventResult, MessageEndEventResult } from "../src/core/extensions/types.ts";
 
 type AgentEndHandler = (event: { type: "agent_end" }, ctx: ExtensionContext) => Promise<void>;
+type BeforeAgentStartHandler = (
+	event: {
+		type: "before_agent_start";
+		prompt: string;
+		systemPrompt: string;
+		systemPromptOptions: never;
+	},
+	ctx: ExtensionContext,
+) => Promise<BeforeAgentStartEventResult | undefined>;
 type MessageEndHandler = (
 	event: { type: "message_end"; message: AgentMessage },
 	ctx: ExtensionContext,
@@ -42,13 +51,17 @@ function textOf(message: AgentMessage | undefined): string {
 
 function setup(cwd: string, results: ExecResult[]) {
 	let agentEnd: AgentEndHandler | undefined;
+	let beforeAgentStart: BeforeAgentStartHandler | undefined;
 	let messageEnd: MessageEndHandler | undefined;
 	const sendUserMessage = vi.fn();
 	const exec = vi.fn<ExtensionAPI["exec"]>().mockImplementation(async () => {
 		return results.shift() ?? { stdout: "", stderr: "missing result", code: 1, killed: false };
 	});
 	const pi = {
-		on(event: string, handler: AgentEndHandler | MessageEndHandler) {
+		on(event: string, handler: AgentEndHandler | BeforeAgentStartHandler | MessageEndHandler) {
+			if (event === "before_agent_start") {
+				beforeAgentStart = handler as BeforeAgentStartHandler;
+			}
 			if (event === "agent_end") {
 				agentEnd = handler as AgentEndHandler;
 			}
@@ -68,6 +81,16 @@ function setup(cwd: string, results: ExecResult[]) {
 		exec,
 		sendUserMessage,
 		message: async (text: string) => messageEnd?.({ type: "message_end", message: assistant(text) }, ctx),
+		start: async () =>
+			beforeAgentStart?.(
+				{
+					type: "before_agent_start",
+					prompt: "build it",
+					systemPrompt: "",
+					systemPromptOptions: undefined as never,
+				},
+				ctx,
+			),
 		settle: async () => agentEnd?.({ type: "agent_end" }, ctx),
 	};
 }
@@ -171,6 +194,16 @@ describe("artifact verifier example", () => {
 		await harness.settle();
 
 		expect(readFileSync(artifact, "utf8")).toBe("best");
+	});
+
+	it("adds hidden preservation guidance when an existing artifact already verifies", async () => {
+		const harness = setup(project(), [result({ ok: true, summary: "existing artifact passes", issues: [] })]);
+
+		const preflight = await harness.start();
+
+		expect(harness.exec).toHaveBeenCalledTimes(1);
+		expect(preflight?.message?.customType).toBe("artifact-verifier-preflight");
+		expect(preflight?.message?.display).toBe(false);
 	});
 
 	it("fails closed when the repair budget is exhausted", async () => {
