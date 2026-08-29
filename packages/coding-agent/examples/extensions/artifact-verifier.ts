@@ -1,5 +1,5 @@
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, isAbsolute, join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "../../src/core/extensions/index.ts";
 
@@ -9,6 +9,7 @@ const FAILED_TOKEN = "ARTIFACT_VERIFICATION_FAILED";
 
 interface ArtifactVerifierConfig {
 	args: string[];
+	artifactPaths: string[];
 	command: string;
 	maxRepairs: number;
 	successToken: string;
@@ -20,6 +21,12 @@ interface VerificationReport {
 	issues: unknown[];
 	ok: boolean;
 	summary: string;
+}
+
+interface BestArtifactState {
+	issueCount: number;
+	report: VerificationReport;
+	snapshots: Map<string, Uint8Array | undefined>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -41,18 +48,56 @@ function parseConfig(value: unknown): ArtifactVerifierConfig {
 		!Number.isInteger(value.maxRepairs) ||
 		value.maxRepairs < 0 ||
 		typeof value.successToken !== "string" ||
-		value.successToken.length === 0
+		value.successToken.length === 0 ||
+		(value.artifactPaths !== undefined &&
+			(!Array.isArray(value.artifactPaths) ||
+				!value.artifactPaths.every(
+					(path) =>
+						typeof path === "string" &&
+						path.length > 0 &&
+						!isAbsolute(path) &&
+						!path.split(/[\\/]/).includes(".."),
+				)))
 	) {
 		throw new Error(`Invalid ${CONFIG_FILE}`);
 	}
 	return {
 		args: value.args,
+		artifactPaths: value.artifactPaths ?? [],
 		command: value.command,
 		maxRepairs: value.maxRepairs,
 		successToken: value.successToken,
 		timeoutMs: value.timeoutMs,
 		version: 1,
 	};
+}
+
+async function captureArtifacts(cwd: string, paths: string[]): Promise<Map<string, Uint8Array | undefined>> {
+	const snapshots = new Map<string, Uint8Array | undefined>();
+	for (const path of paths) {
+		try {
+			snapshots.set(path, await readFile(join(cwd, path)));
+		} catch (error) {
+			if (isRecord(error) && error.code === "ENOENT") {
+				snapshots.set(path, undefined);
+				continue;
+			}
+			throw error;
+		}
+	}
+	return snapshots;
+}
+
+async function restoreArtifacts(cwd: string, snapshots: Map<string, Uint8Array | undefined>): Promise<void> {
+	for (const [path, content] of snapshots) {
+		const target = join(cwd, path);
+		if (content === undefined) {
+			await rm(target, { force: true });
+			continue;
+		}
+		await mkdir(dirname(target), { recursive: true });
+		await writeFile(target, content);
+	}
 }
 
 function parseReport(stdout: string): VerificationReport {
@@ -95,6 +140,7 @@ function replaceToken(message: AgentMessage, token: string, replacement: string)
 export default function artifactVerifier(pi: ExtensionAPI): void {
 	let config: ArtifactVerifierConfig | undefined;
 	let configCwd: string | undefined;
+	let bestArtifactState: BestArtifactState | undefined;
 	let exhausted = false;
 	let repairs = 0;
 	let running = false;
@@ -108,6 +154,7 @@ export default function artifactVerifier(pi: ExtensionAPI): void {
 			return config;
 		}
 		configCwd = ctx.cwd;
+		bestArtifactState = undefined;
 		exhausted = false;
 		repairs = 0;
 		verified = false;
@@ -143,13 +190,26 @@ export default function artifactVerifier(pi: ExtensionAPI): void {
 				cwd: ctx.cwd,
 				timeout: active.timeoutMs,
 			});
-			const report = parseReport(execution.stdout);
+			let report = parseReport(execution.stdout);
 			if (execution.code === 0 && report.ok) {
 				verified = true;
 				pi.sendUserMessage(`Artifact verification passed. Reply with exactly ${active.successToken}`, {
 					deliverAs: "followUp",
 				});
 				return;
+			}
+			let rollbackNotice: string | undefined;
+			if (bestArtifactState !== undefined && report.issues.length > bestArtifactState.issueCount) {
+				const regressedCount = report.issues.length;
+				await restoreArtifacts(ctx.cwd, bestArtifactState.snapshots);
+				report = bestArtifactState.report;
+				rollbackNotice = `The latest repair increased verifier issues from ${bestArtifactState.issueCount} to ${regressedCount}; the best artifact checkpoint was restored.`;
+			} else {
+				bestArtifactState = {
+					issueCount: report.issues.length,
+					report,
+					snapshots: await captureArtifacts(ctx.cwd, active.artifactPaths),
+				};
 			}
 			if (repairs < active.maxRepairs) {
 				repairs += 1;
@@ -158,6 +218,7 @@ export default function artifactVerifier(pi: ExtensionAPI): void {
 						`Artifact verification failed. Repair attempt ${repairs} of ${active.maxRepairs}.`,
 						"Make the smallest targeted edit that addresses only the listed issues. Read the current artifact before editing and preserve every behavior that is not reported as failing.",
 						"Do not replace or rewrite the whole artifact. If a prior repair removed an issue and the latest report brought it back, revert that regression and use a narrower edit.",
+						...(rollbackNotice === undefined ? [] : [rollbackNotice]),
 						JSON.stringify(report),
 						`Do not emit ${active.successToken} until verification passes.`,
 					].join("\n"),
