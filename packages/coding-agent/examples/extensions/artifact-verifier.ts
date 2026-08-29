@@ -183,14 +183,25 @@ export default function artifactVerifier(pi: ExtensionAPI): void {
 			timeout: active.timeoutMs,
 		});
 		const report = parseReport(execution.stdout);
-		if (execution.code !== 0 || !report.ok) {
-			return;
-		}
 		bestArtifactState = {
-			issueCount: 0,
+			issueCount: report.issues.length,
 			report,
 			snapshots: await captureArtifacts(ctx.cwd, active.artifactPaths),
 		};
+		if (execution.code !== 0 || !report.ok) {
+			return {
+				message: {
+					customType: "artifact-verifier-preflight-repair",
+					content: [
+						"The existing artifact is the starting checkpoint. Do not replace or rewrite it.",
+						"Read it first, then make the smallest targeted edits for only this machine report:",
+						JSON.stringify(report),
+						"Preserve all unreported behavior. Finish the original write/read contract, then stop for automatic verification.",
+					].join("\n"),
+					display: false,
+				},
+			};
+		}
 		return {
 			message: {
 				customType: "artifact-verifier-preflight",
